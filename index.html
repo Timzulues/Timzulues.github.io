@@ -2448,6 +2448,32 @@ function resetAll() {
 //                   自动获取实时股价（Yahoo Finance）
 // ═══════════════════════════════════════════════════════════
 
+// Yahoo Finance 不返回 CORS 头部，浏览器直连会被拦截。
+// 走支持 CORS 的公共代理；首选失败时自动回退到下一个。
+const YAHOO_PROXIES = [
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
+];
+
+async function fetchYahooQuote(symbol) {
+  const target = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1d&_=${Date.now()}`;
+  let lastErr;
+  for (const wrap of YAHOO_PROXIES) {
+    try {
+      const res = await fetch(wrap(target), { cache: 'no-store' });
+      if (!res.ok) { lastErr = new Error(`HTTP ${res.status}`); continue; }
+      const data = await res.json();
+      const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+      if (typeof price === 'number' && isFinite(price)) return price;
+      lastErr = new Error('No price in payload');
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('All proxies failed');
+}
+
 async function fetchStockPrices() {
   const statusEl = document.getElementById('fetch-status');
   if (!statusEl) return;
@@ -2455,19 +2481,10 @@ async function fetchStockPrices() {
   statusEl.style.color = 'var(--text-dim)';
 
   try {
-    const [tqqqRes, qqqRes] = await Promise.all([
-      fetch(`https://query1.finance.yahoo.com/v8/finance/chart/TQQQ?range=1d&interval=1d&_=${Date.now()}`),
-      fetch(`https://query1.finance.yahoo.com/v8/finance/chart/QQQ?range=1d&interval=1d&_=${Date.now()}`)
+    const [tqqqPrice, qqqPrice] = await Promise.all([
+      fetchYahooQuote('TQQQ'),
+      fetchYahooQuote('QQQ'),
     ]);
-
-    if (!tqqqRes.ok || !qqqRes.ok) throw new Error('HTTP error');
-
-    const [tqqqData, qqqData] = await Promise.all([tqqqRes.json(), qqqRes.json()]);
-
-    const tqqqPrice = tqqqData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-    const qqqPrice  = qqqData?.chart?.result?.[0]?.meta?.regularMarketPrice;
-
-    if (!tqqqPrice || !qqqPrice) throw new Error('No price data');
 
     document.getElementById('tqqq-input').value = tqqqPrice.toFixed(2);
     document.getElementById('qqq-input').value  = qqqPrice.toFixed(2);
@@ -2481,11 +2498,11 @@ async function fetchStockPrices() {
     updatePrices();
 
   } catch (e) {
-    // CORS or network error — graceful fallback
+    console.error('fetchStockPrices failed:', e);
     const isFile = location.protocol === 'file:';
     statusEl.textContent = isFile
       ? '⚠ 本地文件无法直接请求股价（浏览器安全限制）—— 请手动输入，或将文件托管到 GitHub Pages'
-      : '⚠ 自动获取失败（网络或市场已关闭），请手动输入价格';
+      : '⚠ 自动获取失败（代理或市场已关闭），请手动输入价格';
     statusEl.style.color = 'var(--warn)';
   }
 }
